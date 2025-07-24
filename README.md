@@ -8,7 +8,7 @@
 
 ### Overview
 
-This patch adds SSL session key logging functionality to Nginx 1.28.0, supporting HTTP proxy and gRPC modules. When Nginx acts as a proxy forwarding HTTPS requests to upstream servers, it automatically records SSL session keys to a specified file, facilitating network debugging and security analysis.
+This patch adds SSL session key logging functionality to Nginx, supporting HTTP proxy and gRPC modules. When Nginx acts as a proxy forwarding HTTPS requests to upstream servers, it automatically records SSL session keys to a specified file, facilitating network debugging and security analysis.
 
 ### Features
 
@@ -93,7 +93,6 @@ http {
 
 ### Requirements
 
-- Nginx 1.28.0
 - OpenSSL 1.1.1 or higher
 - HTTP SSL module enabled
 
@@ -126,7 +125,7 @@ After applying the patch and compiling:
 
 ### 概述
 
-这个patch为nginx 1.28.0添加了SSL会话密钥记录功能，支持HTTP代理和gRPC模块。当nginx作为代理转发HTTPS请求到上游服务器时，自动将会话密钥记录到指定文件，便于网络调试和安全分析。
+这个 patch 为 nginx 添加了SSL会话密钥记录功能，支持HTTP代理和gRPC模块。当nginx作为代理转发HTTPS请求到上游服务器时，自动将会话密钥记录到指定文件，便于网络调试和安全分析。
 
 ### 功能特性
 
