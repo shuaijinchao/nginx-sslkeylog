@@ -35,7 +35,7 @@ make && make install
 ```nginx
 # Enable SSL keylog
 proxy_ssl_keylog on;
-proxy_ssl_keylog_file /var/log/nginx/ssl_keys.log;
+proxy_ssl_keylog_file /var/log/nginx/http_ssl_keys.log;
 ```
 
 #### gRPC Module
@@ -49,32 +49,30 @@ grpc_ssl_keylog_file /var/log/nginx/grpc_ssl_keys.log;
 
 #### HTTP Proxy
 ```nginx
-http {
-    # Global SSL keylog settings
-    proxy_ssl_keylog on;
-    proxy_ssl_keylog_file /var/log/nginx/ssl_keys.log;
-    
+http {    
     server {
         listen 80;
         
         location / {
+            proxy_ssl_keylog on;
+            proxy_ssl_keylog_file /var/log/nginx/http_ssl_keys.log;
+            
             proxy_pass https://backend.example.com;
         }
     }
 }
 ```
 
-#### gRPC
+#### gRPC Proxy
 ```nginx
 http {
-    # Global gRPC SSL keylog settings
-    grpc_ssl_keylog on;
-    grpc_ssl_keylog_file /var/log/nginx/grpc_ssl_keys.log;
-    
     server {
         listen 80;
         
         location / {
+            grpc_ssl_keylog on;
+            grpc_ssl_keylog_file /var/log/nginx/grpc_ssl_keys.log;
+            
             grpc_pass grpcs://backend.example.com:443;
         }
     }
@@ -155,7 +153,7 @@ make && make install
 ```nginx
 # 启用SSL keylog
 proxy_ssl_keylog on;
-proxy_ssl_keylog_file /var/log/nginx/ssl_keys.log;
+proxy_ssl_keylog_file /var/log/nginx/http_ssl_keys.log;
 ```
 
 #### gRPC模块
@@ -169,15 +167,14 @@ grpc_ssl_keylog_file /var/log/nginx/grpc_ssl_keys.log;
 
 #### HTTP代理配置
 ```nginx
-http {
-    # 全局启用SSL keylog
-    proxy_ssl_keylog on;
-    proxy_ssl_keylog_file /var/log/nginx/ssl_keys.log;
-    
+http {    
     server {
         listen 80;
         
         location / {
+            proxy_ssl_keylog on;
+            proxy_ssl_keylog_file /var/log/nginx/http_ssl_keys.log;
+            
             proxy_pass https://backend.example.com;
         }
     }
@@ -187,14 +184,13 @@ http {
 #### gRPC配置
 ```nginx
 http {
-    # 全局启用gRPC SSL keylog
-    grpc_ssl_keylog on;
-    grpc_ssl_keylog_file /var/log/nginx/grpc_ssl_keys.log;
-    
     server {
         listen 80;
         
         location / {
+            grpc_ssl_keylog on;
+            grpc_ssl_keylog_file /var/log/nginx/grpc_ssl_keys.log;
+            
             grpc_pass grpcs://backend.example.com:443;
         }
     }
@@ -215,7 +211,6 @@ http {
 
 ### 系统要求
 
-- Nginx 1.28.0
 - OpenSSL 1.1.1或更高版本
 - 启用HTTP SSL模块
 
@@ -246,7 +241,7 @@ http {
 
 ## License
 
-This project is based on Nginx 1.28.0 and follows the same license terms as Nginx.
+This project is based on Nginx and follows the same license terms as Nginx.
 
 ## Contributing
 
@@ -254,6 +249,5 @@ Feel free to submit issues and enhancement requests!
 
 ## Acknowledgments
 
-- Based on Nginx 1.28.0
 - Uses OpenSSL's keylog callback functionality
 - Follows NSS Key Log Format standard
