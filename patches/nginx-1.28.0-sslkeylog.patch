@@ -1,0 +1,306 @@
+diff --git a/src/http/modules/ngx_http_grpc_module.c b/src/http/modules/ngx_http_grpc_module.c
+index 80046d6..5ebaf0a 100644
+--- a/src/http/modules/ngx_http_grpc_module.c
++++ b/src/http/modules/ngx_http_grpc_module.c
+@@ -9,6 +9,10 @@
+ #include <ngx_core.h>
+ #include <ngx_http.h>
+ 
++#if (NGX_HTTP_SSL)
++#include <ngx_event_openssl.h>
++#endif
++
+ 
+ typedef struct {
+     ngx_array_t               *flushes;
+@@ -38,6 +42,11 @@ typedef struct {
+     ngx_str_t                  ssl_trusted_certificate;
+     ngx_str_t                  ssl_crl;
+     ngx_array_t               *ssl_conf_commands;
++    
++    /* SSL keylog support */
++    ngx_flag_t                 ssl_keylog;
++    ngx_str_t                  ssl_keylog_file;
++    ngx_file_t                 ssl_keylog_fd;
+ #endif
+ } ngx_http_grpc_loc_conf_t;
+ 
+@@ -215,6 +224,7 @@ static ngx_int_t ngx_http_grpc_merge_ssl(ngx_conf_t *cf,
+     ngx_http_grpc_loc_conf_t *conf, ngx_http_grpc_loc_conf_t *prev);
+ static ngx_int_t ngx_http_grpc_set_ssl(ngx_conf_t *cf,
+     ngx_http_grpc_loc_conf_t *glcf);
++static void ngx_http_grpc_ssl_keylog_callback(const SSL *ssl, const char *line);
+ #endif
+ 
+ 
+@@ -460,6 +470,20 @@ static ngx_command_t  ngx_http_grpc_commands[] = {
+       offsetof(ngx_http_grpc_loc_conf_t, ssl_conf_commands),
+       &ngx_http_grpc_ssl_conf_command_post },
+ 
++    { ngx_string("grpc_ssl_keylog"),
++      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
++      ngx_conf_set_flag_slot,
++      NGX_HTTP_LOC_CONF_OFFSET,
++      offsetof(ngx_http_grpc_loc_conf_t, ssl_keylog),
++      NULL },
++
++    { ngx_string("grpc_ssl_keylog_file"),
++      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
++      ngx_conf_set_str_slot,
++      NGX_HTTP_LOC_CONF_OFFSET,
++      offsetof(ngx_http_grpc_loc_conf_t, ssl_keylog_file),
++      NULL },
++
+ #endif
+ 
+       ngx_null_command
+@@ -4398,6 +4422,10 @@ ngx_http_grpc_create_loc_conf(ngx_conf_t *cf)
+     conf->upstream.ssl_certificate_cache = NGX_CONF_UNSET_PTR;
+     conf->upstream.ssl_passwords = NGX_CONF_UNSET_PTR;
+     conf->ssl_conf_commands = NGX_CONF_UNSET_PTR;
++    conf->ssl_keylog = NGX_CONF_UNSET;
++    conf->ssl_keylog_file.len = 0;
++    conf->ssl_keylog_file.data = NULL;
++    ngx_memzero(&conf->ssl_keylog_fd, sizeof(ngx_file_t));
+ #endif
+ 
+     /* the hardcoded values */
+@@ -4510,6 +4538,9 @@ ngx_http_grpc_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+     ngx_conf_merge_ptr_value(conf->upstream.ssl_certificate_cache,
+                               prev->upstream.ssl_certificate_cache, NULL);
+ 
++    ngx_conf_merge_value(conf->ssl_keylog, prev->ssl_keylog, 0);
++    ngx_conf_merge_str_value(conf->ssl_keylog_file, prev->ssl_keylog_file, "");
++
+     if (ngx_http_upstream_merge_ssl_passwords(cf, &conf->upstream,
+                                               &prev->upstream)
+         != NGX_OK)
+@@ -5056,6 +5087,25 @@ ngx_http_grpc_set_ssl(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *glcf)
+         return NGX_ERROR;
+     }
+ 
++    /* Set up SSL keylog if enabled */
++    if (glcf->ssl_keylog && glcf->ssl_keylog_file.len > 0) {
++        /* Open keylog file */
++        glcf->ssl_keylog_fd.fd = ngx_open_file(glcf->ssl_keylog_file.data,
++                                              NGX_FILE_WRONLY|NGX_FILE_APPEND,
++                                              NGX_FILE_CREATE_OR_OPEN,
++                                              NGX_FILE_DEFAULT_ACCESS);
++        if (glcf->ssl_keylog_fd.fd == NGX_INVALID_FILE) {
++            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
++                          "failed to open ssl keylog file \"%V\"",
++                          &glcf->ssl_keylog_file);
++            return NGX_ERROR;
++        }
++
++        /* Set keylog callback */
++        SSL_CTX_set_keylog_callback(glcf->upstream.ssl->ctx,
++                                   ngx_http_grpc_ssl_keylog_callback);
++    }
++
+     cln = ngx_pool_cleanup_add(cf->pool, 0);
+     if (cln == NULL) {
+         ngx_ssl_cleanup_ctx(glcf->upstream.ssl);
+@@ -5146,3 +5196,48 @@ ngx_http_grpc_set_ssl(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *glcf)
+ }
+ 
+ #endif
++
++
++static void
++ngx_http_grpc_ssl_keylog_callback(const SSL *ssl, const char *line)
++{
++    ngx_connection_t             *c;
++    ngx_http_request_t           *r;
++    ngx_http_grpc_loc_conf_t     *glcf;
++    ngx_str_t                     log_line;
++    ssize_t                       written;
++    
++    c = ngx_ssl_get_connection(ssl);
++    if (c == NULL) {
++        return;
++    }
++    
++    r = c->data;
++    if (r == NULL) {
++        return;
++    }
++    
++    glcf = ngx_http_get_module_loc_conf(r, ngx_http_grpc_module);
++    if (glcf == NULL || !glcf->ssl_keylog || glcf->ssl_keylog_file.len == 0) {
++        return;
++    }
++    
++    log_line.len = ngx_strlen(line);
++    log_line.data = (u_char *) line;
++    
++    written = ngx_write_fd(glcf->ssl_keylog_fd.fd, log_line.data, log_line.len);
++    if (written == -1) {
++        ngx_log_error(NGX_LOG_ERR, c->log, ngx_errno,
++                      "failed to write to ssl keylog file");
++        return;
++    }
++    
++    /* Write newline if not present */
++    if (log_line.len > 0 && log_line.data[log_line.len - 1] != '\n') {
++        written = ngx_write_fd(glcf->ssl_keylog_fd.fd, (u_char *) "\n", 1);
++        if (written == -1) {
++            ngx_log_error(NGX_LOG_ERR, c->log, ngx_errno,
++                          "failed to write newline to ssl keylog file");
++        }
++    }
++}
+diff --git a/src/http/modules/ngx_http_proxy_module.c b/src/http/modules/ngx_http_proxy_module.c
+index d4c5abf..0c07e95 100644
+--- a/src/http/modules/ngx_http_proxy_module.c
++++ b/src/http/modules/ngx_http_proxy_module.c
+@@ -1,4 +1,3 @@
+-
+ /*
+  * Copyright (C) Igor Sysoev
+  * Copyright (C) Nginx, Inc.
+@@ -9,6 +8,10 @@
+ #include <ngx_core.h>
+ #include <ngx_http.h>
+ 
++#if (NGX_HTTP_SSL)
++#include <ngx_event_openssl.h>
++#endif
++
+ 
+ #define  NGX_HTTP_PROXY_COOKIE_SECURE           0x0001
+ #define  NGX_HTTP_PROXY_COOKIE_SECURE_ON        0x0002
+@@ -125,6 +128,11 @@ typedef struct {
+     ngx_str_t                      ssl_trusted_certificate;
+     ngx_str_t                      ssl_crl;
+     ngx_array_t                   *ssl_conf_commands;
++    
++    /* SSL keylog support */
++    ngx_flag_t                     ssl_keylog;
++    ngx_str_t                      ssl_keylog_file;
++    ngx_file_t                     ssl_keylog_fd;
+ #endif
+ } ngx_http_proxy_loc_conf_t;
+ 
+@@ -246,6 +254,7 @@ static ngx_int_t ngx_http_proxy_merge_ssl(ngx_conf_t *cf,
+     ngx_http_proxy_loc_conf_t *conf, ngx_http_proxy_loc_conf_t *prev);
+ static ngx_int_t ngx_http_proxy_set_ssl(ngx_conf_t *cf,
+     ngx_http_proxy_loc_conf_t *plcf);
++static void ngx_http_proxy_ssl_keylog_callback(const SSL *ssl, const char *line);
+ #endif
+ static void ngx_http_proxy_set_vars(ngx_url_t *u, ngx_http_proxy_vars_t *v);
+ 
+@@ -798,6 +807,20 @@ static ngx_command_t  ngx_http_proxy_commands[] = {
+       offsetof(ngx_http_proxy_loc_conf_t, ssl_conf_commands),
+       &ngx_http_proxy_ssl_conf_command_post },
+ 
++    { ngx_string("proxy_ssl_keylog"),
++      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
++      ngx_conf_set_flag_slot,
++      NGX_HTTP_LOC_CONF_OFFSET,
++      offsetof(ngx_http_proxy_loc_conf_t, ssl_keylog),
++      NULL },
++
++    { ngx_string("proxy_ssl_keylog_file"),
++      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
++      ngx_conf_set_str_slot,
++      NGX_HTTP_LOC_CONF_OFFSET,
++      offsetof(ngx_http_proxy_loc_conf_t, ssl_keylog_file),
++      NULL },
++
+ #endif
+ 
+       ngx_null_command
+@@ -3626,6 +3649,10 @@ ngx_http_proxy_create_loc_conf(ngx_conf_t *cf)
+     conf->upstream.ssl_passwords = NGX_CONF_UNSET_PTR;
+     conf->ssl_verify_depth = NGX_CONF_UNSET_UINT;
+     conf->ssl_conf_commands = NGX_CONF_UNSET_PTR;
++    conf->ssl_keylog = NGX_CONF_UNSET;
++    conf->ssl_keylog_file.len = 0;
++    conf->ssl_keylog_file.data = NULL;
++    ngx_memzero(&conf->ssl_keylog_fd, sizeof(ngx_file_t));
+ #endif
+ 
+     /* "proxy_cyclic_temp_file" is disabled */
+@@ -3987,6 +4014,9 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+     ngx_conf_merge_ptr_value(conf->ssl_conf_commands,
+                               prev->ssl_conf_commands, NULL);
+ 
++    ngx_conf_merge_value(conf->ssl_keylog, prev->ssl_keylog, 0);
++    ngx_conf_merge_str_value(conf->ssl_keylog_file, prev->ssl_keylog_file, "");
++
+     if (conf->ssl && ngx_http_proxy_set_ssl(cf, conf) != NGX_OK) {
+         return NGX_CONF_ERROR;
+     }
+@@ -5316,6 +5346,25 @@ ngx_http_proxy_set_ssl(ngx_conf_t *cf, ngx_http_proxy_loc_conf_t *plcf)
+         return NGX_ERROR;
+     }
+ 
++    /* Set up SSL keylog if enabled */
++    if (plcf->ssl_keylog && plcf->ssl_keylog_file.len > 0) {
++        /* Open keylog file */
++        plcf->ssl_keylog_fd.fd = ngx_open_file(plcf->ssl_keylog_file.data,
++                                              NGX_FILE_WRONLY|NGX_FILE_APPEND,
++                                              NGX_FILE_CREATE_OR_OPEN,
++                                              NGX_FILE_DEFAULT_ACCESS);
++        if (plcf->ssl_keylog_fd.fd == NGX_INVALID_FILE) {
++            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
++                          "failed to open ssl keylog file \"%V\"",
++                          &plcf->ssl_keylog_file);
++            return NGX_ERROR;
++        }
++
++        /* Set keylog callback */
++        SSL_CTX_set_keylog_callback(plcf->upstream.ssl->ctx,
++                                   ngx_http_proxy_ssl_keylog_callback);
++    }
++
+     cln = ngx_pool_cleanup_add(cf->pool, 0);
+     if (cln == NULL) {
+         ngx_ssl_cleanup_ctx(plcf->upstream.ssl);
+@@ -5395,6 +5444,45 @@ ngx_http_proxy_set_ssl(ngx_conf_t *cf, ngx_http_proxy_loc_conf_t *plcf)
+ #endif
+ 
+ 
++static void
++ngx_http_proxy_ssl_keylog_callback(const SSL *ssl, const char *line)
++{
++    ngx_connection_t             *c;
++    ngx_http_request_t           *r;
++    ngx_http_proxy_loc_conf_t    *plcf;
++    ngx_str_t                     log_line;
++    ssize_t                       written;
++    
++    c = ngx_ssl_get_connection(ssl);
++    if (c == NULL) {
++        return;
++    }
++    
++    r = c->data;
++    if (r == NULL) {
++        return;
++    }
++    
++    plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
++    if (plcf == NULL || !plcf->ssl_keylog || plcf->ssl_keylog_file.len == 0) {
++        return;
++    }
++    
++    log_line.len = ngx_strlen(line);
++    log_line.data = (u_char *) line;
++    
++    written = ngx_write_fd(plcf->ssl_keylog_fd.fd, log_line.data, log_line.len);
++    if (written == -1) {
++        ngx_log_error(NGX_LOG_ERR, c->log, ngx_errno,
++                      "failed to write to ssl keylog file");
++        return;
++    }
++    
++    /* Write newline */
++    ngx_write_fd(plcf->ssl_keylog_fd.fd, (u_char *) "\n", 1);
++}
++
++
+ static void
+ ngx_http_proxy_set_vars(ngx_url_t *u, ngx_http_proxy_vars_t *v)
+ {
